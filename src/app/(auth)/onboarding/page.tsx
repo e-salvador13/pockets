@@ -1,21 +1,11 @@
 'use client';
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import {
-  ArrowRight,
-  Upload,
-  Building2,
-  TrendingUp,
-  PiggyBank,
-  Target,
-  Eye,
-  Loader2,
-  CheckCircle2,
-  DollarSign,
-} from 'lucide-react';
+import { Card } from '@/components/ui/card';
+import { ArrowUp, Upload, Loader2, Check, Sparkles } from 'lucide-react';
 import { parseCSV } from '@/lib/import/csv-parser';
 import { categorize } from '@/lib/import/categorizer';
 import {
@@ -27,88 +17,352 @@ import {
 } from '@/lib/store';
 
 /* ─────────────── Types ─────────────── */
-type Step = 0 | 1 | 2 | 3 | 4 | 5;
 
-const TOTAL_STEPS = 6;
+interface Message {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: Date;
+  type?: 'text' | 'upload-prompt' | 'plan';
+  plan?: BudgetPlan;
+}
+
+interface BudgetPlan {
+  archetype: string;
+  monthlyIncome: number;
+  costToBeYou: number;
+  categories: {
+    needs: { name: string; amount: number }[];
+    wants: { name: string; amount: number }[];
+    goals: { name: string; amount: number }[];
+  };
+  insight: string;
+  recommendation: string;
+}
+
+interface TransactionSummary {
+  totalTransactions: number;
+  months: number;
+  topCategories: { category: string; total: number; percentage: number }[];
+  totalIncome: number;
+  totalSpent: number;
+  monthlyAvgSpent: number;
+  surprisingInsight?: string;
+}
+
+/* ─────────────── Constants ─────────────── */
+
+const OPENING_MESSAGE: Message = {
+  id: 'welcome',
+  role: 'assistant',
+  content:
+    "Hey, I'm Pockets. Before we set anything up, I'm curious — what's going on with your money right now? No wrong answers.",
+  timestamp: new Date(),
+  type: 'text',
+};
 
 /* ─────────────── Page ─────────────── */
+
 export default function OnboardingPage() {
   const router = useRouter();
-  const [step, setStep] = useState<Step>(0);
-  const [name, setName] = useState('');
-  const [personality, setPersonality] = useState('');
-  const [primaryGoal, setPrimaryGoal] = useState('');
-  const [checkingFloor, setCheckingFloor] = useState(5000);
-  const [monthlyInvest, setMonthlyInvest] = useState(1500);
-  const [takeHomeIncome, setTakeHomeIncome] = useState(0);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [processedCount, setProcessedCount] = useState(0);
+  const [messages, setMessages] = useState<Message[]>([OPENING_MESSAGE]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [turn, setTurn] = useState(1);
+  const [showUpload, setShowUpload] = useState(false);
+  const [uploadedData, setUploadedData] = useState<TransactionSummary | null>(null);
+  const [plan, setPlan] = useState<BudgetPlan | null>(null);
+  const [showWelcome, setShowWelcome] = useState(true);
   const [isDragging, setIsDragging] = useState(false);
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const next = useCallback(() => {
-    setStep((s) => (s < 5 ? ((s + 1) as Step) : s));
+  // Auto-scroll to bottom
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isLoading]);
+
+  // Hide welcome after animation
+  useEffect(() => {
+    const timer = setTimeout(() => setShowWelcome(false), 2000);
+    return () => clearTimeout(timer);
   }, []);
 
-  const saveProfile = useCallback(() => {
-    setUser({
-      name,
-      personality,
-      primaryGoal,
-      checkingFloor,
-      monthlyInvest,
-      takeHomeIncome,
-      onboardingComplete: true,
-    });
-  }, [name, personality, primaryGoal, checkingFloor, monthlyInvest, takeHomeIncome]);
+  // Focus input
+  useEffect(() => {
+    if (!isLoading && !plan) {
+      inputRef.current?.focus();
+    }
+  }, [isLoading, plan]);
 
-  const handleFileUpload = useCallback(
-    async (file: File) => {
-      setIsProcessing(true);
+  /* ─── Send message ─── */
+  const sendMessage = useCallback(
+    async (text?: string) => {
+      const messageText = text || input.trim();
+      if (!messageText || isLoading) return;
+
+      const userMessage: Message = {
+        id: crypto.randomUUID(),
+        role: 'user',
+        content: messageText,
+        timestamp: new Date(),
+        type: 'text',
+      };
+
+      const updatedMessages = [...messages, userMessage];
+      setMessages(updatedMessages);
+      setInput('');
+      setIsLoading(true);
 
       try {
-        const text = await file.text();
-        const result = parseCSV(text);
-
-        // Categorize and create Transaction objects
-        const transactions: Transaction[] = result.transactions.map((raw) => ({
-          id: crypto.randomUUID(),
-          date: raw.date,
-          amount: raw.amount,
-          description: raw.description,
-          category: categorize(raw.description, raw.amount),
-          checkNumber: raw.checkNumber,
-          source: raw.source,
+        // Build conversation history for API
+        const history = updatedMessages.map((m) => ({
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
         }));
 
-        // Simulate processing animation
-        for (let i = 0; i <= transactions.length; i++) {
-          setProcessedCount(i);
-          await new Promise((r) => setTimeout(r, Math.max(5, 1500 / transactions.length)));
+        const res = await fetch('/api/onboarding', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: history,
+            turn,
+            transactionSummary: uploadedData,
+          }),
+        });
+
+        if (!res.ok) {
+          throw new Error('Failed to get response');
         }
 
-        // Save everything
-        saveProfile();
-        addTransactions(transactions);
-        const budgets = generateBudgets();
-        setBudgets(budgets);
+        const data = await res.json();
 
-        // Brief pause to show completion
-        await new Promise((r) => setTimeout(r, 800));
-        router.push('/chat');
-      } catch (err) {
-        console.error('CSV parse error:', err);
-        setIsProcessing(false);
+        const assistantMessage: Message = {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content: data.message,
+          timestamp: new Date(),
+          type: data.plan ? 'plan' : 'text',
+          plan: data.plan || undefined,
+        };
+
+        setMessages((prev) => [...prev, assistantMessage]);
+        setTurn(data.turn);
+
+        // Show upload prompt after turn 3 (if no data yet)
+        if (data.turn >= 4 && !uploadedData) {
+          setShowUpload(true);
+        }
+
+        // If plan was returned, save it
+        if (data.plan) {
+          setPlan(data.plan);
+        }
+      } catch (error) {
+        console.error('Send error:', error);
+        const errorMessage: Message = {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content:
+            "Sorry, I had trouble processing that. Make sure the server is running and ANTHROPIC_API_KEY is set.",
+          timestamp: new Date(),
+          type: 'text',
+        };
+        setMessages((prev) => [...prev, errorMessage]);
+      } finally {
+        setIsLoading(false);
       }
     },
-    [saveProfile, router]
+    [input, isLoading, messages, turn, uploadedData]
   );
+
+  /* ─── Handle CSV upload ─── */
+  const handleFileUpload = useCallback(
+    async (file: File) => {
+      const text = await file.text();
+      const parseResult = parseCSV(text);
+
+      if (parseResult.transactions.length === 0) {
+        const errMsg: Message = {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          content:
+            "I couldn't read that file. Try exporting a CSV from your bank's website — usually under Statements or Transaction History.",
+          timestamp: new Date(),
+          type: 'text',
+        };
+        setMessages((prev) => [...prev, errMsg]);
+        return;
+      }
+
+      // Process and categorize
+      const processed: Transaction[] = parseResult.transactions.map((t, i) => ({
+        id: `import-${i}-${Date.now()}`,
+        date: t.date,
+        amount: t.amount,
+        description: t.description,
+        category: categorize(t.description, t.amount),
+        source: 'wells-fargo' as const,
+      }));
+
+      // Save to store
+      addTransactions(processed);
+      const budgets = generateBudgets();
+      setBudgets(budgets);
+
+      // Build summary
+      const expenses = processed.filter((t) => t.amount < 0);
+      const income = processed.filter(
+        (t) => t.amount > 0 && t.category === 'Income'
+      );
+      const months = new Set(processed.map((t) => t.date.slice(0, 7)));
+      const monthCount = Math.max(months.size, 1);
+
+      const categoryTotals: Record<string, number> = {};
+      for (const t of expenses) {
+        categoryTotals[t.category] =
+          (categoryTotals[t.category] || 0) + Math.abs(t.amount);
+      }
+
+      const totalSpent = expenses.reduce(
+        (sum, t) => sum + Math.abs(t.amount),
+        0
+      );
+      const totalIncome = income.reduce((sum, t) => sum + t.amount, 0);
+
+      const topCategories = Object.entries(categoryTotals)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6)
+        .map(([category, total]) => ({
+          category,
+          total: Math.round(total / monthCount),
+          percentage: Math.round((total / totalSpent) * 100),
+        }));
+
+      // Generate a surprising insight
+      let surprisingInsight: string | undefined;
+      if (topCategories.length >= 2) {
+        const top = topCategories[0];
+        const second = topCategories[1];
+        if (top.category !== 'Housing' && top.category !== 'Transfer') {
+          surprisingInsight = `${top.category} is the biggest spending category at $${top.total}/mo — more than ${second.category}`;
+        } else if (topCategories.length >= 3) {
+          const third = topCategories[2];
+          surprisingInsight = `After ${top.category}, the next biggest spend is ${second.category} at $${second.total}/mo, followed closely by ${third.category} at $${third.total}/mo`;
+        }
+      }
+
+      const summary: TransactionSummary = {
+        totalTransactions: processed.length,
+        months: monthCount,
+        topCategories,
+        totalIncome: Math.round(totalIncome / monthCount),
+        totalSpent: Math.round(totalSpent / monthCount),
+        monthlyAvgSpent: Math.round(totalSpent / monthCount),
+        surprisingInsight,
+      };
+
+      setUploadedData(summary);
+      setShowUpload(false);
+
+      // Add a system message about the upload
+      const uploadMsg: Message = {
+        id: crypto.randomUUID(),
+        role: 'user',
+        content: `[Uploaded ${processed.length} transactions across ${monthCount} month${monthCount > 1 ? 's' : ''}]`,
+        timestamp: new Date(),
+        type: 'text',
+      };
+      setMessages((prev) => [...prev, uploadMsg]);
+
+      // Automatically trigger next AI turn with the data
+      setIsLoading(true);
+
+      try {
+        const history = [
+          ...messages.map((m) => ({
+            role: m.role as 'user' | 'assistant',
+            content: m.content,
+          })),
+          { role: 'user' as const, content: `I just uploaded my bank transactions. ${processed.length} transactions over ${monthCount} months.` },
+        ];
+
+        const res = await fetch('/api/onboarding', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: history,
+            turn: Math.max(turn, 4),
+            transactionSummary: summary,
+          }),
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          const assistantMsg: Message = {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: data.message,
+            timestamp: new Date(),
+            type: data.plan ? 'plan' : 'text',
+            plan: data.plan || undefined,
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
+          setTurn(data.turn);
+          if (data.plan) setPlan(data.plan);
+        }
+      } catch (error) {
+        console.error('Post-upload error:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [messages, turn]
+  );
+
+  /* ─── Finish onboarding ─── */
+  const finishOnboarding = useCallback(() => {
+    // Extract name from conversation (first user message likely has it)
+    const firstUserMsg = messages.find((m) => m.role === 'user' && m.type === 'text');
+    const nameGuess = firstUserMsg?.content.match(/(?:i'm|im|my name is|i am|call me)\s+(\w+)/i)?.[1] || '';
+
+    setUser({
+      name: nameGuess,
+      personality: plan?.archetype || '',
+      primaryGoal: plan?.recommendation || '',
+      takeHomeIncome: plan?.monthlyIncome || 0,
+      onboardingComplete: true,
+    });
+
+    router.push('/chat');
+  }, [messages, plan, router]);
+
+  /* ─── Drag & drop ─── */
+  const handleDrag = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDragIn = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  }, []);
+
+  const handleDragOut = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  }, []);
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
+      e.stopPropagation();
       setIsDragging(false);
-      const file = e.dataTransfer.files[0];
+      const file = e.dataTransfer?.files?.[0];
       if (file && file.name.endsWith('.csv')) {
         handleFileUpload(file);
       }
@@ -116,543 +370,293 @@ export default function OnboardingPage() {
     [handleFileUpload]
   );
 
-  const skipToChat = useCallback(() => {
-    saveProfile();
-    router.push('/chat');
-  }, [saveProfile, router]);
-
-  return (
-    <div className="relative flex min-h-dvh flex-col items-center justify-center overflow-hidden"
-      style={{ background: '#0A0A0F' }}>
-      {/* Gradient orb */}
-      <div className="pointer-events-none absolute -top-40 left-1/2 h-[600px] w-[600px] -translate-x-1/2 rounded-full opacity-30 blur-3xl"
-        style={{ background: 'radial-gradient(circle, rgba(74,222,128,0.15) 0%, transparent 70%)' }} />
-
-      {/* Progress */}
-      <div className="fixed left-0 right-0 top-0 z-50 px-6 pt-6">
-        <div className="mx-auto max-w-md">
-          <div className="h-0.5 w-full rounded-full" style={{ background: '#2A2A3A' }}>
-            <div
-              className="h-full rounded-full transition-all duration-700 ease-out"
-              style={{
-                width: `${((step + 1) / TOTAL_STEPS) * 100}%`,
-                background: '#4ADE80',
-              }}
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Step content */}
-      <div className="relative z-10 w-full max-w-md px-6">
-        {step === 0 && <SplashStep onContinue={next} />}
-        {step === 1 && <NameStep name={name} setName={setName} onContinue={next} />}
-        {step === 2 && (
-          <PersonalityStep personality={personality} setPersonality={setPersonality} onContinue={next} />
-        )}
-        {step === 3 && (
-          <GoalStep goal={primaryGoal} setGoal={setPrimaryGoal} onContinue={next} />
-        )}
-        {step === 4 && (
-          <FloorStep
-            checkingFloor={checkingFloor}
-            setCheckingFloor={setCheckingFloor}
-            monthlyInvest={monthlyInvest}
-            setMonthlyInvest={setMonthlyInvest}
-            takeHomeIncome={takeHomeIncome}
-            setTakeHomeIncome={setTakeHomeIncome}
-            onContinue={next}
-          />
-        )}
-        {step === 5 && (
-          isProcessing ? (
-            <ProcessingStep count={processedCount} />
-          ) : (
-            <CSVUploadStep
-              isDragging={isDragging}
-              setIsDragging={setIsDragging}
-              handleDrop={handleDrop}
-              fileInputRef={fileInputRef}
-              handleFileUpload={handleFileUpload}
-              onSkip={skipToChat}
-            />
-          )
-        )}
-      </div>
-    </div>
+  /* ─── Key handler ─── */
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    },
+    [sendMessage]
   );
-}
 
-/* ──────────── Step Components ──────────── */
-
-function SplashStep({ onContinue }: { onContinue: () => void }) {
-  const [visible, setVisible] = useState(false);
-  useEffect(() => {
-    setTimeout(() => setVisible(true), 100);
-  }, []);
-
+  /* ─── Render ─── */
   return (
-    <div className={`flex flex-col items-center text-center transition-all duration-700 ${visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'}`}>
-      {/* Logo */}
-      <div
-        className="mb-10 flex h-20 w-20 items-center justify-center rounded-3xl"
-        style={{ background: '#1A1A24', border: '1px solid #2A2A3A' }}
-      >
-        <DollarSign className="h-10 w-10" style={{ color: '#4ADE80' }} />
-      </div>
-
-      <h1 className="mb-3 text-4xl font-bold tracking-tight sm:text-5xl" style={{ color: '#FFFFFF' }}>
-        CashPilot
-      </h1>
-      <p className="mb-2 text-lg" style={{ color: '#8888A0' }}>
-        Your money, one conversation away.
-      </p>
-      <p className="mb-16 text-sm" style={{ color: '#555570' }}>
-        Set goals. Ask questions. Get answers — not spreadsheets.
-      </p>
-
-      <Button
-        onClick={onContinue}
-        className="h-14 w-full max-w-xs rounded-2xl text-base font-medium transition-all hover:scale-[1.02] active:scale-[0.98]"
-        style={{ background: '#4ADE80', color: '#0A0A0F' }}
-      >
-        Get Started
-        <ArrowRight className="ml-2 h-4 w-4" />
-      </Button>
-    </div>
-  );
-}
-
-function NameStep({
-  name,
-  setName,
-  onContinue,
-}: {
-  name: string;
-  setName: (v: string) => void;
-  onContinue: () => void;
-}) {
-  return (
-    <div className="flex flex-col items-center text-center">
-      <h2 className="mb-3 text-3xl font-semibold tracking-tight" style={{ color: '#FFFFFF' }}>
-        What should I call you?
-      </h2>
-      <p className="mb-10 text-sm" style={{ color: '#8888A0' }}>
-        Just your first name is fine.
-      </p>
-
-      <Input
-        type="text"
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder="Your name"
-        autoFocus
-        className="h-14 w-full max-w-xs rounded-2xl border text-center text-xl font-light tracking-wide"
-        style={{
-          background: '#1A1A24',
-          borderColor: '#2A2A3A',
-          color: '#FFFFFF',
-        }}
-        onKeyDown={(e) => e.key === 'Enter' && name.trim() && onContinue()}
-      />
-
-      <Button
-        onClick={onContinue}
-        disabled={!name.trim()}
-        className="mt-8 h-14 w-full max-w-xs rounded-2xl text-base font-medium transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-30"
-        style={{ background: '#4ADE80', color: '#0A0A0F' }}
-      >
-        Continue
-        <ArrowRight className="ml-2 h-4 w-4" />
-      </Button>
-    </div>
-  );
-}
-
-function PersonalityStep({
-  personality,
-  setPersonality,
-  onContinue,
-}: {
-  personality: string;
-  setPersonality: (v: string) => void;
-  onContinue: () => void;
-}) {
-  const chips = [
-    'Be direct and numbers-focused',
-    'Keep it casual and friendly',
-    'Challenge me to do better',
-    'Explain things simply',
-    'Be encouraging and supportive',
-  ];
-
-  return (
-    <div className="flex flex-col items-center text-center">
-      <h2 className="mb-3 text-3xl font-semibold tracking-tight" style={{ color: '#FFFFFF' }}>
-        How should I talk to you?
-      </h2>
-      <p className="mb-8 text-sm" style={{ color: '#8888A0' }}>
-        Describe your ideal financial advisor's tone.
-      </p>
-
-      <textarea
-        value={personality}
-        onChange={(e) => setPersonality(e.target.value)}
-        placeholder="e.g., Be direct and no-nonsense. I want raw numbers and honest assessments. Don't sugarcoat things."
-        rows={4}
-        className="w-full max-w-sm resize-none rounded-2xl border p-4 text-sm leading-relaxed placeholder:opacity-40"
-        style={{
-          background: '#1A1A24',
-          borderColor: '#2A2A3A',
-          color: '#FFFFFF',
-        }}
-      />
-
-      {/* Example chips */}
-      <div className="mt-4 flex flex-wrap justify-center gap-2">
-        {chips.map((chip) => (
-          <button
-            key={chip}
-            onClick={() => setPersonality(personality ? `${personality}. ${chip}` : chip)}
-            className="rounded-full px-3 py-1.5 text-xs transition-all hover:scale-105"
-            style={{
-              background: '#1A1A24',
-              border: '1px solid #2A2A3A',
-              color: '#8888A0',
-            }}
-          >
-            {chip}
-          </button>
-        ))}
-      </div>
-
-      <Button
-        onClick={onContinue}
-        className="mt-8 h-14 w-full max-w-xs rounded-2xl text-base font-medium transition-all hover:scale-[1.02] active:scale-[0.98]"
-        style={{ background: '#4ADE80', color: '#0A0A0F' }}
-      >
-        Continue
-        <ArrowRight className="ml-2 h-4 w-4" />
-      </Button>
-    </div>
-  );
-}
-
-function GoalStep({
-  goal,
-  setGoal,
-  onContinue,
-}: {
-  goal: string;
-  setGoal: (v: string) => void;
-  onContinue: () => void;
-}) {
-  const goals = [
-    { id: 'invest', label: 'Invest More', desc: 'Build long-term wealth', icon: TrendingUp },
-    { id: 'save', label: 'Save Money', desc: 'Grow your safety net', icon: PiggyBank },
-    { id: 'target', label: 'Hit a Target', desc: 'Reach a specific amount', icon: Target },
-    { id: 'clarity', label: 'Get Clarity', desc: 'Understand where money goes', icon: Eye },
-  ];
-
-  return (
-    <div className="flex flex-col items-center text-center">
-      <h2 className="mb-3 text-3xl font-semibold tracking-tight" style={{ color: '#FFFFFF' }}>
-        What's your main goal?
-      </h2>
-      <p className="mb-10 text-sm" style={{ color: '#8888A0' }}>
-        We'll tailor insights around this.
-      </p>
-
-      <div className="grid w-full max-w-sm grid-cols-2 gap-3">
-        {goals.map(({ id, label, desc, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => setGoal(id)}
-            className="flex flex-col items-center gap-3 rounded-2xl border p-5 text-center transition-all hover:scale-[1.02]"
-            style={{
-              background: goal === id ? '#1A1A24' : 'transparent',
-              borderColor: goal === id ? '#4ADE80' : '#2A2A3A',
-            }}
-          >
-            <Icon
-              className="h-6 w-6"
-              style={{ color: goal === id ? '#4ADE80' : '#8888A0' }}
-            />
-            <div>
-              <p className="text-sm font-medium" style={{ color: '#FFFFFF' }}>
-                {label}
-              </p>
-              <p className="mt-0.5 text-xs" style={{ color: '#8888A0' }}>
-                {desc}
-              </p>
-            </div>
-          </button>
-        ))}
-      </div>
-
-      <Button
-        onClick={onContinue}
-        disabled={!goal}
-        className="mt-8 h-14 w-full max-w-xs rounded-2xl text-base font-medium transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-30"
-        style={{ background: '#4ADE80', color: '#0A0A0F' }}
-      >
-        Continue
-        <ArrowRight className="ml-2 h-4 w-4" />
-      </Button>
-    </div>
-  );
-}
-
-function FloorStep({
-  checkingFloor,
-  setCheckingFloor,
-  monthlyInvest,
-  setMonthlyInvest,
-  takeHomeIncome,
-  setTakeHomeIncome,
-  onContinue,
-}: {
-  checkingFloor: number;
-  setCheckingFloor: (v: number) => void;
-  monthlyInvest: number;
-  setMonthlyInvest: (v: number) => void;
-  takeHomeIncome: number;
-  setTakeHomeIncome: (v: number) => void;
-  onContinue: () => void;
-}) {
-  const [subStep, setSubStep] = useState(0);
-
-  const fields = [
-    { label: 'Monthly take-home income', value: takeHomeIncome, setter: setTakeHomeIncome, placeholder: '6,000' },
-    { label: 'Checking account floor', value: checkingFloor, setter: setCheckingFloor, placeholder: '5,000' },
-    { label: 'Monthly investment target', value: monthlyInvest, setter: setMonthlyInvest, placeholder: '1,500' },
-  ];
-
-  const current = fields[subStep];
-  const canContinue = current.value > 0;
-
-  const handleNext = () => {
-    if (subStep < fields.length - 1) {
-      setSubStep(subStep + 1);
-    } else {
-      onContinue();
-    }
-  };
-
-  // Show income bar visualization when on floor/invest steps
-  const showBar = subStep > 0 && takeHomeIncome > 0;
-  const committed = checkingFloor * 0 + monthlyInvest; // floor isn't monthly so don't include
-  const flexible = Math.max(0, takeHomeIncome - committed);
-
-  return (
-    <div className="flex flex-col items-center text-center">
-      {/* Sub-step dots */}
-      <div className="mb-8 flex gap-2">
-        {fields.map((_, i) => (
-          <div
-            key={i}
-            className="h-1.5 rounded-full transition-all duration-500"
-            style={{
-              width: i === subStep ? '32px' : '6px',
-              background: i === subStep ? '#4ADE80' : i < subStep ? '#8888A0' : '#2A2A3A',
-            }}
-          />
-        ))}
-      </div>
-
-      <h2 className="mb-10 text-2xl font-semibold tracking-tight sm:text-3xl" style={{ color: '#FFFFFF' }}>
-        {current.label}
-      </h2>
-
-      <div className="relative w-full max-w-xs">
-        <span className="absolute left-4 top-1/2 -translate-y-1/2 text-xl" style={{ color: '#8888A0' }}>
-          $
-        </span>
-        <Input
-          type="number"
-          value={current.value || ''}
-          onChange={(e) => current.setter(Number(e.target.value))}
-          placeholder={current.placeholder}
-          autoFocus
-          className="h-16 rounded-2xl border pl-10 text-center text-3xl font-light tracking-wide"
-          style={{
-            background: '#1A1A24',
-            borderColor: '#2A2A3A',
-            color: '#FFFFFF',
-          }}
-          onKeyDown={(e) => e.key === 'Enter' && canContinue && handleNext()}
-        />
-      </div>
-
-      {/* Income bar visualization */}
-      {showBar && (
-        <div className="mt-8 w-full max-w-xs">
-          <div className="flex h-3 w-full overflow-hidden rounded-full" style={{ background: '#2A2A3A' }}>
-            <div
-              className="h-full transition-all duration-500"
-              style={{
-                width: `${Math.min(100, (monthlyInvest / takeHomeIncome) * 100)}%`,
-                background: '#4ADE80',
-              }}
-            />
-            <div
-              className="h-full transition-all duration-500"
-              style={{
-                width: `${Math.min(100 - (monthlyInvest / takeHomeIncome) * 100, (flexible / takeHomeIncome) * 100)}%`,
-                background: '#D4A853',
-              }}
-            />
-          </div>
-          <div className="mt-3 flex justify-between text-xs" style={{ color: '#8888A0' }}>
-            <span>
-              <span style={{ color: '#4ADE80' }}>Invest</span> ${monthlyInvest.toLocaleString()}
-            </span>
-            <span>
-              <span style={{ color: '#D4A853' }}>Flexible</span> ${flexible.toLocaleString()}
-            </span>
+    <div
+      className="flex flex-col h-dvh bg-background"
+      onDragOver={handleDrag}
+      onDragEnter={handleDragIn}
+      onDragLeave={handleDragOut}
+      onDrop={handleDrop}
+    >
+      {/* Drag overlay */}
+      {isDragging && (
+        <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center">
+          <div className="border-2 border-dashed border-amber-500/50 rounded-2xl p-12 text-center">
+            <Upload className="w-12 h-12 text-amber-500 mx-auto mb-4" />
+            <p className="text-lg text-amber-500">Drop your bank CSV here</p>
           </div>
         </div>
       )}
 
-      <Button
-        onClick={handleNext}
-        disabled={!canContinue}
-        className="mt-8 h-14 w-full max-w-xs rounded-2xl text-base font-medium transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-30"
-        style={{ background: '#4ADE80', color: '#0A0A0F' }}
-      >
-        {subStep < fields.length - 1 ? 'Continue' : 'Almost done'}
-        <ArrowRight className="ml-2 h-4 w-4" />
-      </Button>
-    </div>
-  );
-}
+      {/* Welcome splash */}
+      {showWelcome && (
+        <div className="fixed inset-0 z-40 bg-background flex items-center justify-center animate-fade-out">
+          <div className="text-center">
+            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center mx-auto mb-4">
+              <Sparkles className="w-8 h-8 text-white" />
+            </div>
+            <h1 className="text-2xl font-semibold tracking-tight">Pockets</h1>
+          </div>
+        </div>
+      )}
 
-function CSVUploadStep({
-  isDragging,
-  setIsDragging,
-  handleDrop,
-  fileInputRef,
-  handleFileUpload,
-  onSkip,
-}: {
-  isDragging: boolean;
-  setIsDragging: (v: boolean) => void;
-  handleDrop: (e: React.DragEvent) => void;
-  fileInputRef: React.RefObject<HTMLInputElement | null>;
-  handleFileUpload: (file: File) => void;
-  onSkip: () => void;
-}) {
-  return (
-    <div className="flex flex-col items-center text-center">
-      <h2 className="mb-3 text-3xl font-semibold tracking-tight" style={{ color: '#FFFFFF' }}>
-        Import your data
-      </h2>
-      <p className="mb-10 text-sm" style={{ color: '#8888A0' }}>
-        Upload a CSV from your bank. Wells Fargo format auto-detected.
-      </p>
-
-      {/* Drop zone */}
-      <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          setIsDragging(true);
-        }}
-        onDragLeave={() => setIsDragging(false)}
-        onDrop={handleDrop}
-        onClick={() => fileInputRef.current?.click()}
-        className="flex w-full max-w-sm cursor-pointer flex-col items-center gap-4 rounded-3xl border-2 border-dashed p-12 transition-all duration-300"
-        style={{
-          borderColor: isDragging ? '#4ADE80' : '#2A2A3A',
-          background: isDragging ? 'rgba(74,222,128,0.05)' : 'rgba(26,26,36,0.3)',
-        }}
-      >
-        <div
-          className="flex h-14 w-14 items-center justify-center rounded-2xl"
-          style={{ background: '#1A1A24' }}
-        >
-          <Upload className="h-6 w-6" style={{ color: '#8888A0' }} />
+      {/* Header */}
+      <header className="flex items-center gap-3 px-4 py-3 border-b border-border/50">
+        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center">
+          <Sparkles className="w-4 h-4 text-white" />
         </div>
         <div>
-          <p className="font-medium" style={{ color: '#FFFFFF' }}>
-            Drop your CSV here
-          </p>
-          <p className="mt-1 text-sm" style={{ color: '#555570' }}>
-            or click to browse
-          </p>
+          <h1 className="text-sm font-medium">Pockets</h1>
+          <p className="text-xs text-muted-foreground">Getting to know you</p>
         </div>
+        {/* Subtle progress dots */}
+        <div className="ml-auto flex gap-1.5">
+          {[1, 2, 3, 4, 5].map((t) => (
+            <div
+              key={t}
+              className={`w-1.5 h-1.5 rounded-full transition-all duration-500 ${
+                t < turn
+                  ? 'bg-amber-500'
+                  : t === turn
+                  ? 'bg-amber-500/50'
+                  : 'bg-muted'
+              }`}
+            />
+          ))}
+        </div>
+      </header>
+
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
+        {messages.map((msg) => (
+          <div
+            key={msg.id}
+            className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-slide-up`}
+          >
+            {msg.type === 'plan' && msg.plan ? (
+              <PlanCard plan={msg.plan} content={msg.content} />
+            ) : (
+              <div
+                className={`max-w-[85%] px-4 py-3 rounded-2xl text-sm leading-relaxed ${
+                  msg.role === 'user'
+                    ? 'bg-amber-600/20 text-foreground rounded-br-md'
+                    : 'bg-card text-foreground rounded-bl-md'
+                } ${
+                  msg.content.startsWith('[Uploaded') ? 'text-xs text-muted-foreground italic bg-transparent' : ''
+                }`}
+              >
+                {msg.content}
+              </div>
+            )}
+          </div>
+        ))}
+
+        {/* Loading indicator */}
+        {isLoading && (
+          <div className="flex justify-start animate-slide-up">
+            <div className="bg-card px-4 py-3 rounded-2xl rounded-bl-md">
+              <div className="flex gap-1.5">
+                <div className="w-2 h-2 rounded-full bg-muted-foreground/50 animate-bounce" style={{ animationDelay: '0ms' }} />
+                <div className="w-2 h-2 rounded-full bg-muted-foreground/50 animate-bounce" style={{ animationDelay: '150ms' }} />
+                <div className="w-2 h-2 rounded-full bg-muted-foreground/50 animate-bounce" style={{ animationDelay: '300ms' }} />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Upload prompt */}
+        {showUpload && !isLoading && (
+          <div className="flex justify-center animate-slide-up">
+            <Card className="bg-card/50 border-amber-500/20 p-4 max-w-sm text-center">
+              <Upload className="w-8 h-8 text-amber-500 mx-auto mb-2" />
+              <p className="text-sm mb-3">
+                Upload a bank CSV to get personalized insights
+              </p>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) handleFileUpload(file);
+                }}
+              />
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="flex-1 border-amber-500/30 text-amber-500 hover:bg-amber-500/10"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <Upload className="w-3.5 h-3.5 mr-1.5" />
+                  Upload CSV
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-muted-foreground"
+                  onClick={() => {
+                    setShowUpload(false);
+                    sendMessage("I don't have a CSV right now, let's skip that for now.");
+                  }}
+                >
+                  Skip
+                </Button>
+              </div>
+            </Card>
+          </div>
+        )}
+
+        <div ref={messagesEndRef} />
       </div>
 
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".csv"
-        className="hidden"
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) handleFileUpload(file);
-        }}
-      />
-
-      {/* Bank connect — coming soon */}
-      <button
-        disabled
-        className="mt-6 flex w-full max-w-sm items-center gap-4 rounded-2xl border px-6 py-4 text-left opacity-40"
-        style={{ background: 'rgba(26,26,36,0.3)', borderColor: '#2A2A3A' }}
-      >
-        <Building2 className="h-5 w-5" style={{ color: '#555570' }} />
-        <div className="flex-1">
-          <p className="text-sm font-medium" style={{ color: '#8888A0' }}>
-            Connect your bank
-          </p>
-          <p className="text-xs" style={{ color: '#555570' }}>
-            Automatic sync
-          </p>
-        </div>
-        <span
-          className="rounded-full px-2.5 py-0.5 text-[10px] font-medium uppercase tracking-wider"
-          style={{ background: '#1A1A24', color: '#555570' }}
-        >
-          Soon
-        </span>
-      </button>
-
-      <button
-        onClick={onSkip}
-        className="mt-10 text-sm transition-colors hover:opacity-80"
-        style={{ color: '#555570' }}
-      >
-        Skip for now
-      </button>
+      {/* Input area */}
+      <div className="px-4 pb-4 pt-2">
+        {plan ? (
+          <Button
+            className="w-full bg-gradient-to-r from-amber-500 to-orange-600 text-white hover:from-amber-600 hover:to-orange-700 h-12 text-base font-medium"
+            onClick={finishOnboarding}
+          >
+            <Check className="w-4 h-4 mr-2" />
+            Let&apos;s go — take me to my dashboard
+          </Button>
+        ) : (
+          <div className="flex gap-2 items-end">
+            <div className="flex-1 relative">
+              <Input
+                ref={inputRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder={
+                  turn === 1
+                    ? "What's on your mind about money..."
+                    : 'Type your response...'
+                }
+                disabled={isLoading}
+                className="h-12 pr-12 bg-card border-border/50 rounded-xl text-sm placeholder:text-muted-foreground/50 focus-visible:ring-amber-500/30"
+              />
+              <Button
+                size="icon"
+                disabled={!input.trim() || isLoading}
+                onClick={() => sendMessage()}
+                className="absolute right-1.5 top-1.5 h-9 w-9 rounded-lg bg-amber-600 hover:bg-amber-700 disabled:opacity-30 disabled:bg-muted"
+              >
+                {isLoading ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <ArrowUp className="w-4 h-4" />
+                )}
+              </Button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
-function ProcessingStep({ count }: { count: number }) {
+/* ─────────────── Plan Card Component ─────────────── */
+
+function PlanCard({ plan, content }: { plan: BudgetPlan; content: string }) {
+  const formatMoney = (n: number) =>
+    `$${n.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+
   return (
-    <div className="flex flex-col items-center text-center">
-      <div className="mb-8">
-        {count > 0 ? (
-          <CheckCircle2 className="h-16 w-16 animate-pulse" style={{ color: '#4ADE80' }} />
-        ) : (
-          <Loader2 className="h-16 w-16 animate-spin" style={{ color: '#4ADE80' }} />
-        )}
+    <div className="w-full space-y-3 animate-slide-up">
+      {/* AI message */}
+      <div className="bg-card px-4 py-3 rounded-2xl rounded-bl-md text-sm leading-relaxed max-w-[85%]">
+        {content}
       </div>
 
-      <h2 className="mb-3 text-2xl font-semibold tracking-tight" style={{ color: '#FFFFFF' }}>
-        {count > 0 ? 'Processing transactions...' : 'Reading your data...'}
-      </h2>
-
-      <p className="text-lg font-light" style={{ color: '#4ADE80' }}>
-        {count > 0 ? `${count} transactions categorized` : 'Hang tight'}
-      </p>
-
-      <div className="mt-8 w-full max-w-xs">
-        <div className="h-1 w-full overflow-hidden rounded-full" style={{ background: '#2A2A3A' }}>
-          <div
-            className="h-full rounded-full transition-all duration-300"
-            style={{ width: '100%', background: '#4ADE80', animation: 'pulse 1.5s infinite' }}
-          />
+      {/* Plan card */}
+      <Card className="bg-gradient-to-br from-card to-card/80 border-amber-500/20 p-5 space-y-4">
+        <div className="text-center">
+          <p className="text-xs text-amber-500 uppercase tracking-wider font-medium mb-1">
+            Your Cost to Be You
+          </p>
+          <p className="text-3xl font-bold">
+            {formatMoney(plan.costToBeYou)}
+            <span className="text-base font-normal text-muted-foreground">/mo</span>
+          </p>
+          {plan.monthlyIncome > 0 && (
+            <p className="text-xs text-muted-foreground mt-1">
+              on {formatMoney(plan.monthlyIncome)}/mo income
+            </p>
+          )}
         </div>
+
+        {/* Categories */}
+        <div className="space-y-3">
+          <CategorySection title="Needs" items={plan.categories.needs} color="emerald" />
+          <CategorySection title="Wants" items={plan.categories.wants} color="amber" />
+          <CategorySection title="Goals" items={plan.categories.goals} color="blue" />
+        </div>
+
+        {/* Insight */}
+        {plan.insight && (
+          <div className="bg-amber-500/10 rounded-lg px-3 py-2">
+            <p className="text-xs text-amber-400">{plan.insight}</p>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function CategorySection({
+  title,
+  items,
+  color,
+}: {
+  title: string;
+  items: { name: string; amount: number }[];
+  color: 'emerald' | 'amber' | 'blue';
+}) {
+  if (!items || items.length === 0) return null;
+
+  const colorMap = {
+    emerald: 'text-emerald-400 bg-emerald-500/10',
+    amber: 'text-amber-400 bg-amber-500/10',
+    blue: 'text-blue-400 bg-blue-500/10',
+  };
+  const total = items.reduce((sum, item) => sum + item.amount, 0);
+
+  return (
+    <div>
+      <div className="flex justify-between items-center mb-1.5">
+        <span className={`text-xs font-medium ${colorMap[color].split(' ')[0]}`}>
+          {title}
+        </span>
+        <span className="text-xs text-muted-foreground">
+          ${total.toLocaleString()}/mo
+        </span>
+      </div>
+      <div className="space-y-1">
+        {items.map((item) => (
+          <div
+            key={item.name}
+            className="flex justify-between items-center text-sm py-1 px-2 rounded-md hover:bg-muted/30 transition-colors"
+          >
+            <span className="text-foreground/80">{item.name}</span>
+            <span className="text-muted-foreground text-xs">
+              ${item.amount.toLocaleString()}
+            </span>
+          </div>
+        ))}
       </div>
     </div>
   );

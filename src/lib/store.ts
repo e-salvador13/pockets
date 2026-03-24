@@ -1,6 +1,6 @@
 /**
- * CashPilot Local Storage
- * Browser localStorage-based state management for v1.
+ * Pockets Local Storage
+ * Browser localStorage-based state management.
  */
 
 import { type Category } from '@/lib/import/categorizer';
@@ -40,6 +40,7 @@ export interface Conversation {
 export interface UserProfile {
   name: string;
   personality: string;
+  archetype: string; // builder | survivor | avoider | optimizer | dreamer
   primaryGoal: string;
   checkingFloor: number;
   monthlyInvest: number;
@@ -57,10 +58,10 @@ export interface AppState {
 /* ───────────────────── Storage Keys ───────────────────── */
 
 const STORAGE_KEYS = {
-  user: 'cashpilot_user',
-  transactions: 'cashpilot_transactions',
-  budgets: 'cashpilot_budgets',
-  conversations: 'cashpilot_conversations',
+  user: 'pockets_user',
+  transactions: 'pockets_transactions',
+  budgets: 'pockets_budgets',
+  conversations: 'pockets_conversations',
 } as const;
 
 /* ───────────────────── Default Values ───────────────────── */
@@ -68,6 +69,7 @@ const STORAGE_KEYS = {
 const DEFAULT_USER: UserProfile = {
   name: '',
   personality: '',
+  archetype: '',
   primaryGoal: '',
   checkingFloor: 5000,
   monthlyInvest: 1500,
