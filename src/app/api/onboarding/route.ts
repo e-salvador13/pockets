@@ -5,9 +5,9 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import Anthropic from '@anthropic-ai/sdk';
 
-const client = new Anthropic();
+const OLLAMA_URL = 'http://localhost:11434';
+const MODEL = 'llama3';
 
 interface OnboardingMessage {
   role: 'user' | 'assistant';
@@ -132,15 +132,36 @@ Current turn: ${turn}. ${turn >= 5 ? 'Present the plan now with the <plan> JSON 
       }
     }
 
-    const response = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 500,
-      system: SYSTEM_PROMPT,
-      messages: claudeMessages,
+    const ollamaMessages = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...claudeMessages,
+    ];
+
+    const response = await fetch(`${OLLAMA_URL}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: ollamaMessages,
+        stream: false,
+        options: {
+          temperature: 0.7,
+          num_predict: 500,
+        },
+      }),
     });
 
-    const assistantMessage =
-      response.content[0].type === 'text' ? response.content[0].text : '';
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('Ollama error:', errText);
+      return NextResponse.json(
+        { error: 'Failed to connect to Ollama. Make sure it is running.' },
+        { status: 502 }
+      );
+    }
+
+    const data = await response.json();
+    const assistantMessage = data.message?.content || '';
 
     // Extract plan if present
     let plan = null;
@@ -164,7 +185,7 @@ Current turn: ${turn}. ${turn >= 5 ? 'Present the plan now with the <plan> JSON 
   } catch (error) {
     console.error('Onboarding API error:', error);
     return NextResponse.json(
-      { error: 'Failed to get response. Make sure ANTHROPIC_API_KEY is set.' },
+      { error: 'Failed to get response. Make sure Ollama is running (ollama serve).' },
       { status: 500 }
     );
   }
